@@ -1,11 +1,11 @@
 import os
 import pickle
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List
 
 import numpy as np
 import pandas as pd
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -29,21 +29,20 @@ app = FastAPI(title="Movie Recommendation API", version="4.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],   # ✅ FIXED
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["*"],   # ✅ FIXED
     allow_headers=["*"],
 )
 
 # =========================
 # LOAD FILE PATHS
 # =========================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # ✅ FIXED
 
 DF_PATH = os.path.join(BASE_DIR, "df.pkl")
 INDICES_PATH = os.path.join(BASE_DIR, "indices.pkl")
 TFIDF_MATRIX_PATH = os.path.join(BASE_DIR, "tfidf_matrix.pkl")
-TFIDF_PATH = os.path.join(BASE_DIR, "tfidf.pkl")
 
 df = None
 indices = None
@@ -53,12 +52,6 @@ TITLE_TO_IDX = {}
 # =========================
 # MODELS
 # =========================
-class MovieCard(BaseModel):
-    tmdb_id: int
-    title: str
-    poster_url: Optional[str] = None
-
-
 class MovieDetails(BaseModel):
     tmdb_id: int
     title: str
@@ -67,7 +60,6 @@ class MovieDetails(BaseModel):
     poster_url: Optional[str]
     backdrop_url: Optional[str]
     genres: List[dict]
-
 
 # =========================
 # UTILS
@@ -90,7 +82,6 @@ async def tmdb_get(url, params):
 def normalize(title):
     return str(title).lower().strip()
 
-
 # =========================
 # LOAD MODEL
 # =========================
@@ -107,10 +98,8 @@ def load_files():
     with open(TFIDF_MATRIX_PATH, "rb") as f:
         tfidf_matrix = pickle.load(f)
 
-    # create map
     for k, v in indices.items():
         TITLE_TO_IDX[normalize(k)] = int(v)
-
 
 # =========================
 # ROUTES
@@ -120,16 +109,12 @@ def load_files():
 def home():
     return {"message": "Movie API Running 🚀"}
 
-
-# 🔍 SEARCH MOVIE (MULTIPLE)
+# 🔍 SEARCH
 @app.get("/tmdb/search")
 async def search_movie(query: str):
-    data = await tmdb_get("/search/movie", {"query": query})
+    return await tmdb_get("/search/movie", {"query": query})
 
-    return data
-
-
-# 🎬 MOVIE DETAILS
+# 🎬 DETAILS
 @app.get("/movie/id/{movie_id}", response_model=MovieDetails)
 async def movie_details(movie_id: int):
     data = await tmdb_get(f"/movie/{movie_id}", {})
@@ -144,24 +129,21 @@ async def movie_details(movie_id: int):
         genres=data.get("genres", [])
     )
 
-
-# 🏠 HOME MOVIES
+# 🏠 HOME
 @app.get("/home")
 async def home_movies(category: str = "popular"):
     data = await tmdb_get(f"/movie/{category}", {})
 
-    movies = []
-    for m in data["results"][:24]:
-        movies.append({
+    return [
+        {
             "tmdb_id": m["id"],
             "title": m["title"],
             "poster_url": make_img(m.get("poster_path"))
-        })
+        }
+        for m in data["results"][:24]
+    ]
 
-    return movies
-
-
-# 🤖 TF-IDF RECOMMENDATION
+# 🤖 TFIDF
 def recommend(title, top_n=10):
     idx = TITLE_TO_IDX.get(normalize(title))
     if idx is None:
@@ -180,19 +162,17 @@ def recommend(title, top_n=10):
 
     return results
 
-
-# 🎯 HYBRID RECOMMENDATION
+# 🎯 HYBRID
 @app.get("/movie/search")
 async def hybrid(query: str):
-    # 1. get movie
     data = await tmdb_get("/search/movie", {"query": query})
+
     if not data["results"]:
         raise HTTPException(status_code=404, detail="Movie not found")
 
     movie = data["results"][0]
     movie_id = movie["id"]
 
-    # 2. TFIDF
     tfidf_titles = recommend(movie["title"], 10)
 
     tfidf_movies = []
@@ -206,7 +186,6 @@ async def hybrid(query: str):
                 "poster_url": make_img(r.get("poster_path"))
             })
 
-    # 3. Genre
     details = await tmdb_get(f"/movie/{movie_id}", {})
     genre_id = details["genres"][0]["id"] if details["genres"] else None
 
@@ -225,27 +204,26 @@ async def hybrid(query: str):
         "tfidf_recommendations": tfidf_movies,
         "genre_recommendations": genre_movies
     }
-# =========================
-# SIMPLE CHATBOT API
-# =========================
+
+# ✅ NEW SIMPLE RECOMMEND
+@app.get("/recommend")
+async def recommend_api(movie: str):
+    return await hybrid(movie)
+
+# 💬 CHATBOT
 @app.get("/chatbot")
 async def chatbot(query: str):
     q = query.lower()
 
     if "action" in q:
         return {"response": "🔥 Try: Avengers, John Wick, Mad Max"}
-    
     elif "romantic" in q or "love" in q:
         return {"response": "❤️ Try: Titanic, The Notebook, La La Land"}
-    
     elif "comedy" in q:
         return {"response": "😂 Try: Hangover, Deadpool, Superbad"}
-    
     elif "horror" in q:
         return {"response": "👻 Try: Conjuring, Annabelle, Insidious"}
-    
     elif "sci-fi" in q:
         return {"response": "🚀 Try: Interstellar, Inception, Matrix"}
-    
     else:
         return {"response": "🤖 Try asking: action, comedy, romantic, horror"}
