@@ -1,267 +1,911 @@
+"""
+CineMatch – Full-Featured Movie Recommender
+==========================================
+Features:
+  • Login / Register system (local session-based)
+  • Voice Search (Web Speech API via HTML component)
+  • AI Movie Recommendations (Anthropic Claude)
+  • AI explains WHY a movie is recommended
+  • Random Movie Picker
+  • Personal Movie Notes / Reviews
+  • Watchlist / Favorites
+  • Fixed Filters (rating + year range)
+  • Dark / Light Mode
+  • Trailer Button
+  • Ratings & popularity bars
+
+Requirements (pip install):
+    streamlit anthropic requests python-dotenv
+
+Environment variables needed (.env or Streamlit secrets):
+    TMDB_API_KEY=...
+    ANTHROPIC_API_KEY=...
+"""
+
+import hashlib
+import json
+import os
+import random
+
+
 import requests
 import streamlit as st
+from dotenv import load_dotenv
 
-# =============================
+load_dotenv()
+
+# ─────────────────────────────────────────────
 # CONFIG
-# =============================
-API_BASE = "https://movie-rec-466x.onrender.com"
-# API_BASE = "http://127.0.0.1:8000"
+# ─────────────────────────────────────────────
+API_BASE      = "https://movie-rec-466x.onrender.com"
+TMDB_IMG      = "https://image.tmdb.org/t/p/w500"
+YOUTUBE_SEARCH = "https://www.youtube.com/results?search_query="
 
-TMDB_IMG = "https://image.tmdb.org/t/p/w500"
 
-st.set_page_config(page_title="🎬 Movie AI", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="CineMatch", page_icon="🎬", layout="wide")
 
-# =============================
-# ULTRA UI STYLE
-# =============================
+# ─────────────────────────────────────────────
+# SIMPLE USER STORE  (in-memory; swap for DB in prod)
+# ─────────────────────────────────────────────
+if "users_db" not in st.session_state:
+    # {username: {password_hash, watchlist, notes, ai_history}}
+    st.session_state.users_db = {}
+
+def _hash(pw: str) -> str:
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+def register_user(username: str, password: str) -> tuple[bool, str]:
+    if not username or not password:
+        return False, "Username and password required."
+    if len(password) < 4:
+        return False, "Password must be at least 4 characters."
+    if username in st.session_state.users_db:
+        return False, "Username already exists."
+    st.session_state.users_db[username] = {
+        "password_hash": _hash(password),
+        "watchlist": {},
+        "notes": {},
+        "ai_history": [],
+    }
+    return True, "Account created!"
+
+def login_user(username: str, password: str) -> tuple[bool, str]:
+    db = st.session_state.users_db
+    if username not in db:
+        return False, "User not found."
+    if db[username]["password_hash"] != _hash(password):
+        return False, "Wrong password."
+    return True, "Welcome back!"
+
+def current_user():
+    return st.session_state.get("logged_in_user")
+
+def user_data() -> dict:
+    u = current_user()
+    if u and u in st.session_state.users_db:
+        return st.session_state.users_db[u]
+    # fallback (guest)
+    if "guest_data" not in st.session_state:
+        st.session_state.guest_data = {"watchlist": {}, "notes": {}, "ai_history": []}
+    return st.session_state.guest_data
+
+# ─────────────────────────────────────────────
+# THEME
+# ─────────────────────────────────────────────
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = True
+
+def theme_css(dark: bool) -> str:
+    if dark:
+        return """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Sora:wght@300;400;500;600;700&display=swap');
+        :root{
+          --bg:#09090f; --bg2:#111118; --card:#16161f; --card2:#1e1e2a;
+          --acc:#e50914; --acc2:#ff6b35; --acc3:#f5c518;
+          --t1:#f0f0f8; --t2:#9090b0; --t3:#505068;
+          --bdr:rgba(255,255,255,0.07);
+          --sh:0 8px 32px rgba(0,0,0,0.6);
+          --tag:rgba(229,9,20,0.18); --tagc:#ff7070;
+          --input:#1a1a26;
+        }
+        </style>"""
+    else:
+        return """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Sora:wght@300;400;500;600;700&display=swap');
+        :root{
+          --bg:#f2f2f8; --bg2:#ffffff; --card:#ffffff; --card2:#ebebf5;
+          --acc:#e50914; --acc2:#ff6b35; --acc3:#d4a017;
+          --t1:#0d0d1a; --t2:#4a4a6a; --t3:#9090aa;
+          --bdr:rgba(0,0,0,0.08);
+          --sh:0 4px 20px rgba(0,0,0,0.10);
+          --tag:rgba(229,9,20,0.08); --tagc:#cc0000;
+          --input:#ffffff;
+        }
+        </style>"""
+
+st.markdown(theme_css(st.session_state.dark_mode), unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# GLOBAL CSS
+# ─────────────────────────────────────────────
 st.markdown("""
 <style>
-.block-container { padding-top: 1rem; max-width: 1400px; }
+html,body,.stApp{background:var(--bg)!important;color:var(--t1)!important;font-family:'Sora',sans-serif!important}
+.block-container{padding-top:0.4rem!important;padding-bottom:3rem!important;max-width:1500px!important}
+[data-testid="stSidebar"]{background:var(--bg2)!important;border-right:1px solid var(--bdr)!important}
+[data-testid="stSidebar"] *{color:var(--t1)!important}
 
-.movie-title {
-    font-size: 0.9rem;
-    font-weight: 600;
-    height: 2.3rem;
-    overflow: hidden;
-}
+/* Buttons */
+.stButton>button{
+  background:transparent!important;border:1px solid var(--bdr)!important;
+  color:var(--t2)!important;border-radius:9px!important;
+  font-family:'Sora',sans-serif!important;font-size:0.8rem!important;
+  transition:all 0.18s ease!important;padding:0.4rem 0.8rem!important}
+.stButton>button:hover{background:var(--acc)!important;color:#fff!important;border-color:var(--acc)!important;transform:translateY(-1px)!important}
 
-.card {
-    border-radius: 18px;
-    padding: 10px;
-    background: #111;
-    transition: 0.3s;
-}
-.card:hover {
-    transform: scale(1.05);
-}
+/* Inputs */
+.stTextInput input,.stTextArea textarea{
+  background:var(--input)!important;border:1px solid var(--bdr)!important;
+  color:var(--t1)!important;border-radius:10px!important;
+  font-family:'Sora',sans-serif!important}
+.stTextInput input:focus,.stTextArea textarea:focus{border-color:var(--acc)!important;box-shadow:0 0 0 3px rgba(229,9,20,0.14)!important}
 
-.stButton>button {
-    border-radius: 10px;
-    background: linear-gradient(90deg,#ff416c,#ff4b2b);
-    color: white;
-}
+/* Select */
+[data-baseweb="select"] *{background:var(--input)!important;color:var(--t1)!important}
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"]{background:var(--bg2)!important;border-radius:12px!important;padding:4px!important}
+.stTabs [data-baseweb="tab"]{color:var(--t2)!important;border-radius:9px!important;font-family:'Sora',sans-serif!important}
+.stTabs [aria-selected="true"]{background:var(--acc)!important;color:#fff!important}
+
+hr{border-color:var(--bdr)!important;opacity:1!important}
+
+/* Cards */
+.movie-card{background:var(--card);border:1px solid var(--bdr);border-radius:14px;overflow:hidden;transition:transform 0.2s,box-shadow 0.2s}
+.movie-card:hover{transform:translateY(-4px);box-shadow:var(--sh)}
+.movie-title{font-size:0.83rem;font-weight:600;line-height:1.18rem;max-height:2.36rem;overflow:hidden;color:var(--t1);margin:6px 0 3px}
+.movie-meta{font-size:0.72rem;color:var(--t3)}
+.star-row{display:flex;align-items:center;gap:3px;font-size:0.78rem;color:var(--acc3);font-weight:600}
+.bar-wrap{background:var(--bdr);border-radius:99px;height:3px;overflow:hidden;margin-top:3px}
+.bar-fill{height:100%;border-radius:99px;background:linear-gradient(90deg,var(--acc),var(--acc2))}
+.genre-tag{display:inline-block;padding:2px 8px;border-radius:99px;background:var(--tag);color:var(--tagc);font-size:0.7rem;font-weight:600;margin:2px 2px 0 0}
+.wl-badge{position:absolute;top:7px;right:7px;background:var(--acc);color:#fff;font-size:0.65rem;font-weight:700;padding:2px 7px;border-radius:99px;z-index:10}
+.sec-head{font-family:'Bebas Neue',sans-serif;font-size:1.85rem;letter-spacing:0.07em;color:var(--t1);margin:0.1rem 0}
+.sec-sub{font-size:0.82rem;color:var(--t3);margin-bottom:0.9rem}
+.hero-wrap{position:relative;border-radius:18px;overflow:hidden;margin-bottom:1.8rem}
+.hero-img{width:100%;max-height:370px;object-fit:cover;display:block}
+.hero-over{position:absolute;inset:0;background:linear-gradient(90deg,rgba(0,0,0,0.85) 0%,rgba(0,0,0,0.25) 60%,transparent 100%)}
+.hero-cnt{position:absolute;bottom:0;left:0;padding:2rem 2.5rem}
+.hero-title{font-family:'Bebas Neue',sans-serif;font-size:2.8rem;color:#fff;letter-spacing:0.05em;line-height:1;text-shadow:0 2px 14px rgba(0,0,0,0.5)}
+.hero-sub{font-size:0.88rem;color:rgba(255,255,255,0.72);margin-top:0.35rem}
+.stat-box{background:var(--card);border:1px solid var(--bdr);border-radius:12px;padding:0.9rem;text-align:center}
+.stat-val{font-family:'Bebas Neue',sans-serif;font-size:2rem;color:var(--acc);letter-spacing:0.04em}
+.stat-lbl{font-size:0.72rem;color:var(--t3);margin-top:1px}
+.note-card{background:var(--card2);border:1px solid var(--bdr);border-radius:12px;padding:1rem;margin-bottom:0.7rem}
+.ai-bubble-user{background:var(--acc);color:#fff;border-radius:14px 14px 4px 14px;padding:0.7rem 1rem;margin:0.4rem 0;font-size:0.88rem;max-width:80%;margin-left:auto}
+.ai-bubble-bot{background:var(--card2);border:1px solid var(--bdr);color:var(--t1);border-radius:14px 14px 14px 4px;padding:0.7rem 1rem;margin:0.4rem 0;font-size:0.88rem;max-width:85%}
+.login-wrap{max-width:420px;margin:3rem auto;background:var(--card);border:1px solid var(--bdr);border-radius:20px;padding:2.5rem}
 </style>
 """, unsafe_allow_html=True)
 
-# =============================
-# STATE
-# =============================
-if "view" not in st.session_state:
-    st.session_state.view = "home"
+# ─────────────────────────────────────────────
+# SESSION STATE INIT
+# ─────────────────────────────────────────────
+for k, v in [
+    ("view", "home"), ("selected_tmdb_id", None),
+    ("logged_in_user", None), ("auth_tab", "login"),
+    ("voice_query", ""), ("ai_chat", []),
+]:
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-if "selected_tmdb_id" not in st.session_state:
-    st.session_state.selected_tmdb_id = None
-
-# =============================
+# ─────────────────────────────────────────────
 # NAVIGATION
-# =============================
-def goto_home():
-    st.session_state.view = "home"
-    st.session_state.selected_tmdb_id = None
+# ─────────────────────────────────────────────
+def goto(view, tmdb_id=None):
+    st.session_state.view = view
+    if tmdb_id:
+        st.session_state.selected_tmdb_id = int(tmdb_id)
     st.rerun()
 
-def goto_details(id):
-    st.session_state.view = "details"
-    st.session_state.selected_tmdb_id = id
-    st.rerun()
+# ─────────────────────────────────────────────
+# WATCHLIST / NOTES helpers (per-user)
+# ─────────────────────────────────────────────
+def watchlist() -> dict:
+    return user_data()["watchlist"]
 
-# =============================
-# API CALL
-# =============================
-@st.cache_data(ttl=30)
-def api(path, params=None):
-    try:
-        r = requests.get(f"{API_BASE}{path}", params=params, timeout=20)
-        return r.json()
-    except:
-        return None
+def notes_store() -> dict:
+    return user_data()["notes"]
 
-# =============================
-# ✅ FIXED GRID UI
-# =============================
-def grid(movies, cols=6, key_prefix="grid"):
-    if not movies:
-        st.warning("No Movies Found 😢")
-        return
-
-    rows = (len(movies)+cols-1)//cols
-    idx = 0
-
-    for r in range(rows):
-        cols_ui = st.columns(cols)
-
-        for c in range(cols):
-            if idx >= len(movies):
-                break
-
-            m = movies[idx]
-            idx += 1
-
-            with cols_ui[c]:
-                st.markdown("<div class='card'>", unsafe_allow_html=True)
-
-                if m.get("poster_url"):
-                    # ✅ FIXED (no deprecated warning)
-                    st.image(m["poster_url"], width="stretch")
-
-                if st.button(
-                    "🎬 Open",
-                    key=f"{key_prefix}_{r}_{c}_{idx}_{m.get('tmdb_id')}"
-                ):
-                    goto_details(m.get("tmdb_id"))
-
-                st.markdown(
-                    f"<div class='movie-title'>{m.get('title')}</div>",
-                    unsafe_allow_html=True
-                )
-
-                st.markdown("</div>", unsafe_allow_html=True)
-
-# =============================
-# ✅ FIXED PARSE FUNCTION
-# =============================
-def parse(data):
-    movies = []
-
-    if not data:
-        return movies
-
-    # Case 1: TMDB format
-    if isinstance(data, dict) and "results" in data:
-        for m in data["results"]:
-            if not m.get("title") or not m.get("id"):
-                continue
-
-            movies.append({
-                "tmdb_id": m["id"],
-                "title": m["title"],
-                "poster_url": f"{TMDB_IMG}{m['poster_path']}" if m.get("poster_path") else None
-            })
-
-    # Case 2: already list
-    elif isinstance(data, list):
-        movies = data
-
-    return movies
-
-# =============================
-# SIDEBAR
-# =============================
-with st.sidebar:
-    st.title("🎬 Menu")
-
-    if st.button("🏠 Home"):
-        goto_home()
-
-    st.markdown("---")
-
-    cols = st.slider("Grid", 4, 8, 6)
-
-    st.markdown("---")
-    st.markdown("## 🤖 AI Assistant")
-
-    user_q = st.text_input("Ask: action movies, love...")
-
-    if st.button("Ask AI"):
-        res = requests.get(f"{API_BASE}/chatbot", params={"query": user_q})
-        if res.status_code == 200:
-            st.success(res.json()["response"])
-
-# =============================
-# HEADER
-# =============================
-st.title("🎬 Movie Recommendation System")
-st.caption("Search → Explore → AI Recommendations")
-
-# =============================
-# HOME
-# =============================
-if st.session_state.view == "home":
-
-    query = st.text_input("Search Movie...")
-
-    if query and len(query.strip()) > 1:
-        data = api("/tmdb/search", {"query": query})
-
-        if data:
-            movies = parse(data)
-
-            if movies:
-                grid(movies[:24], cols, key_prefix="search")
-            else:
-                st.warning("No result found 😢 Try another movie")
-
-        else:
-            st.error("API Error")
-
+def toggle_wl(movie: dict):
+    wl = watchlist()
+    tid = movie.get("tmdb_id")
+    if not tid: return
+    tid = int(tid)
+    if tid in wl:
+        del wl[tid]
     else:
-        st.markdown("### 🔥 Trending")
+        wl[tid] = movie
 
-        data = api("/home", {"category": "popular"})
+def in_wl(tmdb_id) -> bool:
+    return int(tmdb_id) in watchlist()
 
-        if data:
-            grid(data, cols, key_prefix="home")
+def save_note(tmdb_id: int, title: str, text: str, rating: int):
+    notes_store()[tmdb_id] = {"title": title, "text": text, "rating": rating}
 
-# =============================
-# DETAILS
-# =============================
-elif st.session_state.view == "details":
+def get_note(tmdb_id: int) -> dict:
+    return notes_store().get(int(tmdb_id), {})
 
-    id = st.session_state.selected_tmdb_id
+# ─────────────────────────────────────────────
+# API HELPERS
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=120)
+def api_get(path: str, params: dict | None = None):
+    try:
+        r = requests.get(f"{API_BASE}{path}", params=params, timeout=25)
+        if r.status_code >= 400:
+            return None, f"HTTP {r.status_code}"
+        return r.json(), None
+    except Exception as e:
+        return None, str(e)
 
-    if st.button("⬅ Back"):
-        goto_home()
+def star_html(vote) -> str:
+    if not vote: return ""
+    f = round(float(vote) / 2)
+    s = "★" * f + "☆" * (5 - f)
+    return f"<div class='star-row'>{s} <span style='color:var(--t3);font-weight:400'>{float(vote):.1f}</span></div><div class='bar-wrap'><div class='bar-fill' style='width:{int(float(vote)*10)}%'></div></div>"
 
-    data = api(f"/movie/id/{id}")
+# ─────────────────────────────────────────────
+# FILTER HELPERS  (★ FIXED – applied AFTER fetch)
+# ─────────────────────────────────────────────
+def apply_filters(cards: list, min_r: float, yr: tuple) -> list:
+    out = []
+    for m in (cards or []):
+        try:
+            vote = float(m.get("vote_average") or 0)
+        except:
+            vote = 0
+        raw_date = str(m.get("release_date") or "")
+        year_str = raw_date[:4]
+        year = int(year_str) if year_str.isdigit() else 0
+        if vote < min_r:
+            continue
+        # only filter year if we actually have a year value
+        if year and not (yr[0] <= year <= yr[1]):
+            continue
+        out.append(m)
+    return out
 
-    if not data:
-        st.error("Failed")
+# ─────────────────────────────────────────────
+# TMDB PARSE
+# ─────────────────────────────────────────────
+def parse_search(data, keyword: str, limit=24):
+    keyword_l = keyword.strip().lower()
+    raw_items = []
+    if isinstance(data, dict) and "results" in data:
+        for m in (data.get("results") or []):
+            t = (m.get("title") or "").strip()
+            tid = m.get("id")
+            if not t or not tid: continue
+            pp = m.get("poster_path")
+            raw_items.append({
+                "tmdb_id": int(tid), "title": t,
+                "poster_url": f"{TMDB_IMG}{pp}" if pp else None,
+                "release_date": m.get("release_date",""),
+                "vote_average": m.get("vote_average"),
+            })
+    elif isinstance(data, list):
+        for m in data:
+            tid = m.get("tmdb_id") or m.get("id")
+            t = (m.get("title") or "").strip()
+            if not t or not tid: continue
+            raw_items.append({
+                "tmdb_id": int(tid), "title": t,
+                "poster_url": m.get("poster_url"),
+                "release_date": m.get("release_date",""),
+                "vote_average": m.get("vote_average"),
+            })
+    matched = [x for x in raw_items if keyword_l in x["title"].lower()]
+    final = matched if matched else raw_items
+    sugg = []
+    for x in final[:10]:
+        yr = (x.get("release_date") or "")[:4]
+        label = f"{x['title']} ({yr})" if yr else x["title"]
+        sugg.append((label, x["tmdb_id"]))
+    cards = final[:limit]
+    return sugg, cards
+
+def tfidf_to_cards(items):
+    out = []
+    for x in (items or []):
+        t = x.get("tmdb") or {}
+        if t.get("tmdb_id"):
+            out.append({
+                "tmdb_id": t["tmdb_id"],
+                "title": t.get("title") or x.get("title") or "Untitled",
+                "poster_url": t.get("poster_url"),
+                "vote_average": t.get("vote_average"),
+                "release_date": t.get("release_date"),
+            })
+    return out
+
+# ─────────────────────────────────────────────
+# POSTER GRID
+# ─────────────────────────────────────────────
+def poster_grid(cards, cols=5, prefix="g", show_wl=True):
+    if not cards:
+        st.markdown("<div style='color:var(--t3);padding:1.5rem 0;text-align:center'>No movies match your filters.</div>", unsafe_allow_html=True)
+        return
+    rows = (len(cards) + cols - 1) // cols
+    idx = 0
+    for r in range(rows):
+        cs = st.columns(cols, gap="small")
+        for c in range(cols):
+            if idx >= len(cards): break
+            m = cards[idx]; idx += 1
+            tid = m.get("tmdb_id")
+            title = m.get("title","Untitled")
+            poster = m.get("poster_url")
+            vote = m.get("vote_average")
+            year = (m.get("release_date") or "")[:4]
+            wl = in_wl(tid) if tid else False
+            with cs[c]:
+                if wl:
+                    st.markdown("<div class='wl-badge'>★ SAVED</div>", unsafe_allow_html=True)
+                if poster:
+                    st.image(poster, use_container_width=True)
+                else:
+                    st.markdown("<div style='height:170px;background:var(--card2);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:2.2rem'>🎬</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='movie-title'>{title}</div>", unsafe_allow_html=True)
+                if vote:
+                    st.markdown(star_html(vote), unsafe_allow_html=True)
+                if year:
+                    st.markdown(f"<div class='movie-meta'>{year}</div>", unsafe_allow_html=True)
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("Open", key=f"{prefix}_o_{r}_{c}_{idx}"):
+                        if tid: goto("details", tid)
+                with b2:
+                    if show_wl and tid:
+                        lbl = "★" if wl else "☆"
+                        if st.button(lbl, key=f"{prefix}_w_{r}_{c}_{idx}"):
+                            toggle_wl(m); st.rerun()
+
+# ─────────────────────────────────────────────
+# VOICE SEARCH COMPONENT
+# ─────────────────────────────────────────────
+VOICE_JS = """
+<div style="margin-bottom:0.6rem">
+  <button onclick="startVoice()" id="voiceBtn"
+    style="background:var(--acc,#e50914);color:#fff;border:none;border-radius:10px;
+           padding:0.5rem 1.2rem;font-size:0.9rem;cursor:pointer;display:flex;align-items:center;gap:8px">
+    🎤 Voice Search
+  </button>
+  <div id="voiceStatus" style="font-size:0.78rem;color:var(--t3,#666);margin-top:5px"></div>
+</div>
+<script>
+function startVoice(){
+  if(!('webkitSpeechRecognition' in window||'SpeechRecognition' in window)){
+    document.getElementById('voiceStatus').innerText='❌ Not supported in this browser (use Chrome)';return;
+  }
+  var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  var r=new SR();r.lang='en-US';r.interimResults=false;r.maxAlternatives=1;
+  document.getElementById('voiceBtn').innerText='🔴 Listening…';
+  document.getElementById('voiceStatus').innerText='Speak now…';
+  r.onresult=function(e){
+    var t=e.results[0][0].transcript;
+    document.getElementById('voiceStatus').innerText='✅ Heard: '+t;
+    document.getElementById('voiceBtn').innerText='🎤 Voice Search';
+    // Write to a hidden Streamlit text input and trigger change
+    var inputs=window.parent.document.querySelectorAll('input[type="text"]');
+    if(inputs.length>0){
+      var inp=inputs[0];
+      var nativeInputValueSetter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+      nativeInputValueSetter.call(inp,t);
+      inp.dispatchEvent(new Event('input',{bubbles:true}));
+    }
+  };
+  r.onerror=function(e){
+    document.getElementById('voiceStatus').innerText='❌ Error: '+e.error;
+    document.getElementById('voiceBtn').innerText='🎤 Voice Search';
+  };
+  r.onend=function(){document.getElementById('voiceBtn').innerText='🎤 Voice Search';};
+  r.start();
+}
+</script>
+"""
+
+# ─────────────────────────────────────────────
+# AI – ANTHROPIC
+# ─────────────────────────────────────────────
+# def get_ai_client():
+#     key = ANTHROPIC_KEY or st.secrets.get("ANTHROPIC_API_KEY","")
+#     if not key:
+#         return None
+#     return anthropic.Anthropic(api_key=key)
+
+# def ai_recommend(user_prompt: str, history: list) -> str:
+#     client = get_ai_client()
+#     if not client:
+#         return "⚠️ ANTHROPIC_API_KEY not set. Add it to `.env` or Streamlit secrets."
+#     msgs = []
+#     for h in history[-8:]:          # last 8 turns for context
+#         msgs.append({"role": h["role"], "content": h["content"]})
+#     msgs.append({"role": "user", "content": user_prompt})
+#     try:
+#         resp = client.messages.create(
+#             model="claude-opus-4-5",
+#             max_tokens=700,
+#             system=(
+#                 "You are CineMatch AI, an expert movie recommender. "
+#                 "When users describe a mood, vibe, or preference, suggest 3-5 specific movies with titles in **bold**, "
+#                 "a one-sentence pitch per movie, and a short reason WHY it fits their request. "
+#                 "Keep replies concise, engaging, and formatted nicely. "
+#                 "Always include the release year after each title."
+#             ),
+#             messages=msgs,
+#         )
+#         return resp.content[0].text
+#     except Exception as e:
+#         return f"❌ AI error: {e}"
+
+# def ai_explain_rec(movie_title: str, rec_title: str) -> str:
+#     client = get_ai_client()
+#     if not client:
+#         return "⚠️ ANTHROPIC_API_KEY not set."
+#     try:
+#         resp = client.messages.create(
+#             model="claude-opus-4-5",
+#             max_tokens=200,
+#             system="You are a knowledgeable movie expert. Give a concise 2-3 sentence explanation.",
+#             messages=[{"role":"user","content":
+#                 f"Why would someone who liked '{movie_title}' also enjoy '{rec_title}'? "
+#                 "Focus on themes, tone, and style."}],
+#         )
+#         return resp.content[0].text
+#     except Exception as e:
+#         return f"❌ {e}"
+
+# ─────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("<div style='font-family:Bebas Neue,sans-serif;font-size:1.9rem;color:var(--acc);letter-spacing:0.1em;padding:0.4rem 0 0.1rem'>🎬 CineMatch</div>", unsafe_allow_html=True)
+
+    # User status
+    u = current_user()
+    if u:
+        st.markdown(f"<div style='font-size:0.8rem;color:var(--t3)'>Logged in as <b style='color:var(--t1)'>{u}</b></div>", unsafe_allow_html=True)
+        if st.button("🚪 Logout", use_container_width=True):
+            st.session_state.logged_in_user = None
+            st.rerun()
+    else:
+        st.markdown("<div style='font-size:0.78rem;color:var(--t3)'>Guest mode – login to save data</div>", unsafe_allow_html=True)
+        if st.button("🔐 Login / Register", use_container_width=True):
+            goto("login")
+
+    st.markdown("---")
+
+    # Nav
+    pages = [("🏠", "Home", "home"), 
+             ("★", "Watchlist", "watchlist"), ("📝", "My Reviews", "reviews"),
+             ("🎲", "Random Pick", "random")]
+    for icon, label, view in pages:
+        wl_c = len(watchlist())
+        display = f"{icon}  {label}" + (f"  ({wl_c})" if view == "watchlist" and wl_c else "")
+        if st.button(display, use_container_width=True, key=f"nav_{view}"):
+            goto(view)
+
+    st.markdown("---")
+
+    # Filters
+    st.markdown("<div style='font-size:0.75rem;font-weight:700;color:var(--t3);letter-spacing:0.07em'>FILTERS</div>", unsafe_allow_html=True)
+    min_rating = st.slider("Min Rating ⭐", 0.0, 10.0, 0.0, 0.5, key="min_r")
+    year_range = st.slider("Release Year 📅", 1960, 2025, (1990, 2025), key="yr")
+    st.markdown("<div style='font-size:0.7rem;color:var(--t3);margin-top:4px'>Filters apply to all grids</div>", unsafe_allow_html=True)
+
+    st.markdown("---")
+    # Feed category
+    st.markdown("<div style='font-size:0.75rem;font-weight:700;color:var(--t3);letter-spacing:0.07em'>HOME FEED</div>", unsafe_allow_html=True)
+    home_cat = st.selectbox("", ["trending","popular","top_rated","now_playing","upcoming"], label_visibility="collapsed")
+    grid_cols = st.slider("Columns", 3, 8, 5, key="gc")
+
+    st.markdown("---")
+    mode_lbl = "☀️ Light Mode" if st.session_state.dark_mode else "🌙 Dark Mode"
+    if st.button(mode_lbl, use_container_width=True):
+        st.session_state.dark_mode = not st.session_state.dark_mode
+        st.rerun()
+
+# Short aliases for filter values (read after sidebar renders)
+MIN_R = st.session_state.get("min_r", 0.0)
+YR    = st.session_state.get("yr", (1990, 2025))
+
+# ─────────────────────────────────────────────
+# HEADER BAR
+# ─────────────────────────────────────────────
+st.markdown("<div style='border-bottom:1px solid var(--bdr);padding-bottom:0.8rem;margin-bottom:1.2rem'><span style='font-family:Bebas Neue,sans-serif;font-size:2.2rem;color:var(--acc);letter-spacing:0.08em'>🎬 CINEMATCH</span><span style='font-size:0.82rem;color:var(--t3);margin-left:1rem'>Discover · Save · Explore</span></div>", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════
+# VIEW: LOGIN / REGISTER
+# ═══════════════════════════════════════════
+if st.session_state.view == "login":
+    _, mc, _ = st.columns([1,2,1])
+    with mc:
+        st.markdown("<div class='login-wrap'>", unsafe_allow_html=True)
+        st.markdown("<div style='font-family:Bebas Neue,sans-serif;font-size:2rem;color:var(--acc);letter-spacing:0.08em;text-align:center;margin-bottom:1.2rem'>🎬 CINEMATCH</div>", unsafe_allow_html=True)
+        tab_login, tab_reg = st.tabs(["🔐 Login", "📝 Register"])
+
+        with tab_login:
+            lu = st.text_input("Username", key="l_user")
+            lp = st.text_input("Password", type="password", key="l_pass")
+            if st.button("Login", use_container_width=True, key="do_login"):
+                ok, msg = login_user(lu, lp)
+                if ok:
+                    st.session_state.logged_in_user = lu
+                    st.success(msg)
+                    goto("home")
+                else:
+                    st.error(msg)
+            st.markdown("<div style='text-align:center;margin-top:1rem'>", unsafe_allow_html=True)
+            if st.button("Continue as Guest →", key="guest_btn"):
+                goto("home")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with tab_reg:
+            ru = st.text_input("Choose Username", key="r_user")
+            rp = st.text_input("Choose Password (min 4 chars)", type="password", key="r_pass")
+            rp2 = st.text_input("Confirm Password", type="password", key="r_pass2")
+            if st.button("Create Account", use_container_width=True, key="do_reg"):
+                if rp != rp2:
+                    st.error("Passwords don't match.")
+                else:
+                    ok, msg = register_user(ru, rp)
+                    if ok:
+                        st.session_state.logged_in_user = ru
+                        st.success(msg + " Logging you in…")
+                        goto("home")
+                    else:
+                        st.error(msg)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════
+# VIEW: HOME
+# ═══════════════════════════════════════════
+elif st.session_state.view == "home":
+
+    # Voice search component
+    st.components.v1.html(VOICE_JS, height=70)
+
+    typed = st.text_input("🔍 Search movies", placeholder="Type title or use voice search above…", label_visibility="collapsed")
+
+    if typed.strip():
+        if len(typed.strip()) < 2:
+            st.caption("Keep typing…")
+        else:
+            with st.spinner("Searching…"):
+                data, err = api_get("/tmdb/search", {"query": typed.strip()})
+            if err or data is None:
+                st.error(f"Search failed: {err}")
+            else:
+                sugg, cards = parse_search(data, typed.strip(), 24)
+                cards = apply_filters(cards, MIN_R, YR)   # ★ FIXED filter
+
+                if sugg:
+                    labels = ["-- Pick a movie for full details --"] + [s[0] for s in sugg]
+                    sel = st.selectbox("Suggestions", labels, label_visibility="collapsed")
+                    if sel != labels[0]:
+                        goto("details", {s[0]:s[1] for s in sugg}[sel])
+
+                st.markdown(f'<div class="sec-head">Results for "{typed}"</div>', unsafe_allow_html=True)
+
+                st.markdown(f"<div class='sec-sub'>{len(cards)} movies · filters: ⭐≥{MIN_R} · {YR[0]}–{YR[1]}</div>", unsafe_allow_html=True)
+                poster_grid(cards, cols=grid_cols, prefix="srch")
         st.stop()
 
-    c1, c2 = st.columns([1,2])
+    # Home feed
+    with st.spinner("Loading…"):
+        hcards, err = api_get("/home", {"category": home_cat, "limit": 24})
+    if err or not hcards:
+        st.error(f"Feed error: {err}")
+        st.stop()
 
-    with c1:
-        if data.get("poster_url"):
-            st.image(data["poster_url"], width=300)
+    hcards = apply_filters(hcards, MIN_R, YR)   # ★ FIXED filter
 
-    with c2:
-        st.subheader(data.get("title"))
-        st.caption(data.get("release_date"))
+    # Hero card
+    if hcards:
+        hero = hcards[0]
+        if hero.get("tmdb_id"):
+            hd, _ = api_get(f"/movie/id/{hero['tmdb_id']}")
+            if hd and hd.get("backdrop_url"):
+                bd = hd["backdrop_url"]; ht = hd.get("title","")
+                ov = (hd.get("overview") or "")[:130]+"…"
+                gn = " · ".join([g["name"] for g in hd.get("genres",[])[:3]])
+                vt = hd.get("vote_average",0); yr2 = (hd.get("release_date",""))[:4]
+                st.markdown(f"""
+                <div class='hero-wrap'>
+                  <img class='hero-img' src='{bd}'/>
+                  <div class='hero-over'></div>
+                  <div class='hero-cnt'>
+                    <div class='hero-title'>{ht}</div>
+                    <div class='hero-sub'>{'★'*round(float(vt)/2)} {float(vt):.1f} &nbsp;·&nbsp; {yr2} &nbsp;·&nbsp; {gn}</div>
+                    <div style='color:rgba(255,255,255,0.6);font-size:0.84rem;margin-top:0.4rem;max-width:480px'>{ov}</div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+                if st.button(f"▶  Open  {ht}", key="hero_btn"):
+                    goto("details", hero["tmdb_id"])
+                st.markdown("---")
 
-        genres = ", ".join([g["name"] for g in data.get("genres", [])])
-        st.caption(genres)
+    st.markdown(f"<div class='sec-head'>{home_cat.replace('_',' ').upper()}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='sec-sub'>{len(hcards)} movies · ⭐≥{MIN_R} · {YR[0]}–{YR[1]}</div>", unsafe_allow_html=True)
+    poster_grid(hcards, cols=grid_cols, prefix="home")
 
-        st.write(data.get("overview"))
+# ═══════════════════════════════════════════
+# VIEW: AI CHAT
+# ═══════════════════════════════════════════
+# elif st.session_state.view == "ai":
+#     st.markdown("<div class='sec-head'>🤖 AI MOVIE ADVISOR</div>", unsafe_allow_html=True)
+#     st.markdown("<div class='sec-sub'>Describe your mood, a vibe, or a theme — get personalised picks with reasons</div>", unsafe_allow_html=True)
 
-    # =============================
-    # RECOMMENDATIONS
-    # =============================
-    st.markdown("## 🔥 Recommendations")
+#     if not ANTHROPIC_KEY and not st.secrets.get("ANTHROPIC_API_KEY",""):
+#         st.warning("⚠️ Set **ANTHROPIC_API_KEY** in `.env` or Streamlit secrets to enable AI features.")
 
-    bundle = api("/movie/search", {"query": data.get("title")})
+#     # Chat history (per-user)
+#     history = user_data()["ai_history"]
 
-    if bundle:
+#     # Display chat
+#     for msg in history:
+#         css = "ai-bubble-user" if msg["role"]=="user" else "ai-bubble-bot"
+#         prefix = "You" if msg["role"]=="user" else "🤖 CineMatch AI"
+#         st.markdown(f"<div class='{css}'><b style='font-size:0.72rem;opacity:0.7'>{prefix}</b><br>{msg['content']}</div>", unsafe_allow_html=True)
 
-        # TFIDF
-        tfidf = []
-        for x in bundle.get("tfidf_recommendations", []):
-            tm = x.get("tmdb") or {}
-            if tm.get("tmdb_id"):
-                tfidf.append({
-                    "tmdb_id": tm["tmdb_id"],
-                    "title": tm["title"],
-                    "poster_url": tm["poster_url"]
-                })
+#     # Quick prompt chips
+#     st.markdown("<div style='margin:0.6rem 0 0.3rem;font-size:0.78rem;color:var(--t3)'>Quick prompts:</div>", unsafe_allow_html=True)
+#     chips = [
+#         "I want something scary but smart",
+#         "A feel-good movie for Friday night",
+#         "Like Inception but different",
+#         "Best sci-fi of the 90s",
+#         "A tearjerker romance",
+#     ]
+#     chip_cols = st.columns(len(chips))
+#     for i, chip in enumerate(chips):
+#         with chip_cols[i]:
+#             if st.button(chip, key=f"chip_{i}"):
+#                 with st.spinner("AI thinking…"):
+#                     reply = ai_recommend(chip, history)
+#                 history.append({"role":"user","content":chip})
+#                 history.append({"role":"assistant","content":reply})
+#                 st.rerun()
 
-        if tfidf:
-            st.markdown("### 🤖 Similar Movies")
-            grid(tfidf, cols, key_prefix="tfidf")
+#     # Free-form input
+#     col_inp, col_btn = st.columns([5,1])
+#     with col_inp:
+#         user_msg = st.text_input("Ask AI…", placeholder="e.g. 'something like Parasite but lighter'", label_visibility="collapsed", key="ai_input")
+#     with col_btn:
+#         send = st.button("Send ➤", key="ai_send")
 
-        # GENRE
-        genre = bundle.get("genre_recommendations", [])
-        if genre:
-            st.markdown("### 🎭 Same Genre")
-            grid(genre, cols, key_prefix="genre")
+#     if send and user_msg.strip():
+#         with st.spinner("AI thinking…"):
+#             reply = ai_recommend(user_msg.strip(), history)
+#         history.append({"role":"user","content":user_msg.strip()})
+#         history.append({"role":"assistant","content":reply})
+#         st.rerun()
 
+#     if history:
+#         if st.button("🗑️ Clear chat", key="clear_chat"):
+#             user_data()["ai_history"] = []
+#             st.rerun()
+
+# ═══════════════════════════════════════════
+# VIEW: WATCHLIST
+# ═══════════════════════════════════════════
+elif st.session_state.view == "watchlist":
+    if st.button("← Home"): goto("home")
+    st.markdown("<div class='sec-head'>★ MY WATCHLIST</div>", unsafe_allow_html=True)
+    wl = watchlist()
+    if not wl:
+        st.markdown("<div style='text-align:center;padding:4rem 0;color:var(--t3)'><div style='font-size:3.5rem'>🎬</div><div style='font-size:1.1rem;margin-top:0.5rem'>Watchlist is empty</div><div style='font-size:0.85rem;margin-top:0.3rem'>Click ☆ on any movie card to save it</div></div>", unsafe_allow_html=True)
     else:
-        st.warning("No recommendations available")
+        wl_cards = apply_filters(list(wl.values()), MIN_R, YR)
+        st.markdown(f"<div class='sec-sub'>{len(wl_cards)} movies shown · {len(wl)} saved total</div>", unsafe_allow_html=True)
+        poster_grid(wl_cards, cols=grid_cols, prefix="wl")
+        if st.button("🗑️ Clear all"):
+            user_data()["watchlist"] = {}; st.rerun()
+
+# ═══════════════════════════════════════════
+# VIEW: REVIEWS / NOTES
+# ═══════════════════════════════════════════
+elif st.session_state.view == "reviews":
+    if st.button("← Home"): goto("home")
+    st.markdown("<div class='sec-head'>📝 MY REVIEWS</div>", unsafe_allow_html=True)
+    ns = notes_store()
+    if not ns:
+        st.markdown("<div style='text-align:center;padding:3rem 0;color:var(--t3)'><div style='font-size:3rem'>📝</div><div>No reviews yet — open a movie and add a note!</div></div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div class='sec-sub'>{len(ns)} reviews written</div>", unsafe_allow_html=True)
+        for tid, note in ns.items():
+            stars = "⭐" * note.get("rating",0)
+            st.markdown(f"""
+            <div class='note-card'>
+              <div style='font-weight:700;font-size:1rem;color:var(--t1)'>{note['title']}</div>
+              <div style='color:var(--acc3);font-size:1rem;margin:2px 0'>{stars}</div>
+              <div style='color:var(--t2);font-size:0.88rem;margin-top:6px'>{note['text']}</div>
+            </div>""", unsafe_allow_html=True)
+            if st.button(f"🗑️ Delete", key=f"del_note_{tid}"):
+                del ns[tid]; st.rerun()
+
+# ═══════════════════════════════════════════
+# VIEW: RANDOM MOVIE PICKER
+# ═══════════════════════════════════════════
+elif st.session_state.view == "random":
+    if st.button("← Home"): goto("home")
+    st.markdown("<div class='sec-head'>🎲 RANDOM MOVIE PICKER</div>", unsafe_allow_html=True)
+    st.markdown("<div class='sec-sub'>Can't decide? Let fate choose for you</div>", unsafe_allow_html=True)
+
+    cats = ["trending","popular","top_rated"]
+    if st.button("🎲 Roll the dice!", key="roll"):
+        cat = random.choice(cats)
+        with st.spinner("Picking a random movie for you…"):
+            data, err = api_get("/home", {"category": cat, "limit": 20})
+        if data:
+            pool = apply_filters(data, MIN_R, YR)
+            if pool:
+                pick = random.choice(pool)
+                st.session_state["random_pick"] = pick
+            else:
+                st.info("No movies match your current filters. Try lowering the minimum rating.")
+        else:
+            st.error(f"Error: {err}")
+
+    pick = st.session_state.get("random_pick")
+    if pick:
+        tid = pick.get("tmdb_id"); title = pick.get("title","")
+        poster = pick.get("poster_url"); vote = pick.get("vote_average"); year = (pick.get("release_date",""))[:4]
+        c1, c2 = st.columns([1,2], gap="large")
+        with c1:
+            if poster: st.image(poster, use_container_width=True)
+        with c2:
+            st.markdown(f"<div class='sec-head'>{title}</div>", unsafe_allow_html=True)
+            if vote: st.markdown(star_html(vote), unsafe_allow_html=True)
+            if year: st.markdown(f"<div class='movie-meta'>{year}</div>", unsafe_allow_html=True)
+            bc1, bc2, bc3 = st.columns(3)
+            with bc1:
+                if st.button("▶ Open Movie", key="rand_open"): goto("details", tid)
+            with bc2:
+                if st.button("☆ Save", key="rand_save"):
+                    toggle_wl(pick); st.rerun()
+            with bc3:
+                if st.button("🎲 Try Again", key="rand_again"):
+                    del st.session_state["random_pick"]; st.rerun()
+
+# ═══════════════════════════════════════════
+# VIEW: DETAILS
+# ═══════════════════════════════════════════
+elif st.session_state.view == "details":
+    tmdb_id = st.session_state.selected_tmdb_id
+    if not tmdb_id:
+        st.warning("No movie selected."); goto("home")
+
+    if st.button("← Back"): goto("home")
+
+    with st.spinner("Loading…"):
+        data, err = api_get(f"/movie/id/{tmdb_id}")
+    if err or not data:
+        st.error(f"Load failed: {err}"); st.stop()
+
+    title     = data.get("title","")
+    vote      = data.get("vote_average") or 0
+    release   = data.get("release_date") or "-"
+    year      = release[:4]
+    genres    = data.get("genres",[]) or []
+    overview  = data.get("overview") or "No overview available."
+    poster_url = data.get("poster_url")
+    backdrop_url = data.get("backdrop_url")
+
+    # Hero
+    if backdrop_url:
+        tags = "".join([f"<span class='genre-tag'>{g['name']}</span>" for g in genres[:4]])
+        st.markdown(f"""
+        <div class='hero-wrap'>
+          <img class='hero-img' src='{backdrop_url}'/>
+          <div class='hero-over'></div>
+          <div class='hero-cnt'>
+            <div class='hero-title'>{title}</div>
+            <div class='hero-sub'>{year} &nbsp; {tags}</div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+    left, right = st.columns([1,2.8], gap="large")
+
+    with left:
+        if poster_url: st.image(poster_url, use_container_width=True)
+        else: st.markdown("<div style='height:280px;background:var(--card2);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:3.5rem'>🎬</div>", unsafe_allow_html=True)
+
+        # Watchlist button
+        wl = in_wl(tmdb_id)
+        if st.button("★ Remove from Watchlist" if wl else "☆ Add to Watchlist", use_container_width=True, key="det_wl"):
+            toggle_wl({"tmdb_id":tmdb_id,"title":title,"poster_url":poster_url,"vote_average":vote,"release_date":release})
+            st.rerun()
+
+        # Trailer
+        tq = f"{title} {year} official trailer".replace(" ","+")
+        st.link_button("▶ Watch Trailer", f"{YOUTUBE_SEARCH}{tq}", use_container_width=True)
+
+    with right:
+        st.markdown(f"<div class='sec-head'>{title}</div>", unsafe_allow_html=True)
+        tags = "".join([f"<span class='genre-tag'>{g['name']}</span>" for g in genres])
+        st.markdown(f"<div style='margin-bottom:0.8rem'>{tags}</div>", unsafe_allow_html=True)
+
+        c1,c2,c3 = st.columns(3)
+        for col, val, lbl in [(c1,f"{float(vote):.1f}","TMDB Rating"),(c2,year,"Release Year"),(c3,f"{int(float(vote)*10)}%","Score")]:
+            with col:
+                st.markdown(f"<div class='stat-box'><div class='stat-val'>{val}</div><div class='stat-lbl'>{lbl}</div></div>", unsafe_allow_html=True)
+
+        st.markdown(star_html(vote), unsafe_allow_html=True)
+        st.markdown(f"<div style='margin-top:1rem;font-size:0.72rem;font-weight:700;letter-spacing:0.08em;color:var(--t3)'>OVERVIEW</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:0.95rem;line-height:1.7;color:var(--t2)'>{overview}</div>", unsafe_allow_html=True)
+
+    # ── Personal Note / Review ──
+    st.markdown("---")
+    st.markdown("<div class='sec-head'>📝 MY REVIEW</div>", unsafe_allow_html=True)
+    existing = get_note(tmdb_id)
+    with st.expander("Write / Edit your review", expanded=bool(existing)):
+        my_stars = st.slider("Your Rating", 0, 5, existing.get("rating",0), key=f"nstar_{tmdb_id}")
+        my_note  = st.text_area("Your thoughts…", value=existing.get("text",""), height=100, key=f"ntxt_{tmdb_id}")
+        if st.button("💾 Save Review", key=f"nsave_{tmdb_id}"):
+            save_note(tmdb_id, title, my_note, my_stars)
+            st.success("Review saved!")
+            st.rerun()
+        if existing and st.button("🗑️ Delete Review", key=f"ndel_{tmdb_id}"):
+            if tmdb_id in notes_store(): del notes_store()[tmdb_id]
+            st.rerun()
+
+    # ── Recommendations ──
+    st.markdown("---")
+    with st.spinner("Loading recommendations…"):
+        bundle, err2 = api_get("/movie/search", {"query":title,"tfidf_top_n":12,"genre_limit":12})
+
+    if not err2 and bundle:
+        tfidf_cards = apply_filters(tfidf_to_cards(bundle.get("tfidf_recommendations")), MIN_R, YR)
+        genre_cards = apply_filters(bundle.get("genre_recommendations",[]), MIN_R, YR)
+
+        st.markdown("<div class='sec-head'>🔎 SIMILAR MOVIES</div>", unsafe_allow_html=True)
+        st.markdown("<div class='sec-sub'>Content-based · click 💡 for AI explanation</div>", unsafe_allow_html=True)
+
+        if tfidf_cards:
+            rows = (len(tfidf_cards) + grid_cols - 1) // grid_cols
+            idx = 0
+            for r in range(rows):
+                cs = st.columns(grid_cols, gap="small")
+                for c in range(grid_cols):
+                    if idx >= len(tfidf_cards): break
+                    m = tfidf_cards[idx]; idx += 1
+                    rtid = m.get("tmdb_id"); rtitle = m.get("title","")
+                    rposter = m.get("poster_url"); rvote = m.get("vote_average")
+                    with cs[c]:
+                        if rposter: st.image(rposter, use_container_width=True)
+                        st.markdown(f"<div class='movie-title'>{rtitle}</div>", unsafe_allow_html=True)
+                        if rvote: st.markdown(star_html(rvote), unsafe_allow_html=True)
+                        ba, bb, bc = st.columns(3)
+                        with ba:
+                            if st.button("Open", key=f"tr_o_{r}_{c}"):
+                                if rtid: goto("details", rtid)
+                        with bb:
+                            wlb = "★" if (rtid and in_wl(rtid)) else "☆"
+                            if st.button(wlb, key=f"tr_w_{r}_{c}"):
+                                toggle_wl(m); st.rerun()
+                        with bc:
+                            if st.button("💡", key=f"tr_e_{r}_{c}"):
+                                with st.spinner("AI explaining…"):
+                                    exp = ai_explain_rec(title, rtitle)
+                                st.info(f"**Why watch '{rtitle}'?**\n\n{exp}")
+
+        st.markdown("<div class='sec-head'>🎭 MORE LIKE THIS</div>", unsafe_allow_html=True)
+        st.markdown("<div class='sec-sub'>Genre-based picks</div>", unsafe_allow_html=True)
+        poster_grid(genre_cards, cols=grid_cols, prefix="det_g")
+    else:
+        genre_only, _ = api_get("/recommend/genre", {"tmdb_id":tmdb_id,"limit":18})
+        if genre_only:
+            poster_grid(apply_filters(genre_only, MIN_R, YR), cols=grid_cols, prefix="det_gf")
